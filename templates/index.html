@@ -1,191 +1,176 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pocket Bot</title>
+const $ = (id) => document.getElementById(id);
 
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='style.css') }}">
-</head>
+function addLog(message) {
+    const log = $("activityLog");
+    const line = document.createElement("div");
 
-<body>
+    line.className = "log-line";
 
-<div class="app">
+    const time = new Date().toLocaleTimeString();
 
-    <header>
-        <div>
-            <h1>POCKET BOT</h1>
-            <p>Automated Trading Dashboard</p>
-        </div>
+    line.textContent = `[${time}] ${message}`;
 
-        <div id="connectionStatus" class="status stopped">
-            STOPPED
-        </div>
-    </header>
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+}
 
 
-    <section class="stats">
-
-        <div class="stat-card">
-            <span>Profit</span>
-            <strong id="profit">$0.00</strong>
-        </div>
-
-        <div class="stat-card">
-            <span>Wins</span>
-            <strong id="wins">0</strong>
-        </div>
-
-        <div class="stat-card">
-            <span>Losses</span>
-            <strong id="losses">0</strong>
-        </div>
-
-        <div class="stat-card">
-            <span>Status</span>
-            <strong id="botStatus">Ready</strong>
-        </div>
-
-    </section>
+function getConfig() {
+    return {
+        mode: $("mode").value,
+        asset: $("asset").value,
+        timeframe: Number($("timeframe").value),
+        amount: Number($("amount").value),
+        min_payout: Number($("minPayout").value),
+        take_profit: Number($("takeProfit").value),
+        stop_loss: Number($("stopLoss").value),
+        martingale: $("martingale").value
+    };
+}
 
 
-    <main>
+async function saveConfig() {
+    const response = await fetch("/api/config", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(getConfig())
+    });
 
-        <section class="panel">
+    if (!response.ok) {
+        throw new Error("Could not save configuration");
+    }
 
-            <h2>Trading Settings</h2>
-
-
-            <label>Account</label>
-
-            <select id="mode">
-                <option value="demo">Demo</option>
-                <option value="real">Real</option>
-            </select>
-
-
-            <label>Asset</label>
-
-            <select id="asset">
-                <option value="EURUSD_otc">EUR/USD OTC</option>
-                <option value="GBPUSD_otc">GBP/USD OTC</option>
-                <option value="AUDUSD_otc">AUD/USD OTC</option>
-                <option value="USDJPY_otc">USD/JPY OTC</option>
-            </select>
+    return await response.json();
+}
 
 
-            <label>Timeframe</label>
+async function startBot() {
+    try {
+        $("startButton").disabled = true;
 
-            <select id="timeframe">
-                <option value="60">1 Minute</option>
-                <option value="300">5 Minutes</option>
-            </select>
+        await saveConfig();
 
+        const response = await fetch("/api/start", {
+            method: "POST"
+        });
 
-            <label>Trade Amount ($)</label>
+        const data = await response.json();
 
-            <input
-                id="amount"
-                type="number"
-                value="1"
-                min="1"
-                step="0.01"
-            >
+        if (!response.ok) {
+            throw new Error(data.error || "Could not start bot");
+        }
 
+        updateDashboard(data.state);
 
-            <label>Minimum Payout (%)</label>
+        addLog("Bot started.");
 
-            <input
-                id="minPayout"
-                type="number"
-                value="80"
-                min="1"
-                max="100"
-            >
+    } catch (error) {
+
+        addLog("ERROR: " + error.message);
+        $("startButton").disabled = false;
+    }
+}
 
 
-            <label>Take Profit ($)</label>
+async function stopBot() {
+    try {
+        const response = await fetch("/api/stop", {
+            method: "POST"
+        });
 
-            <input
-                id="takeProfit"
-                type="number"
-                value="10"
-                step="0.01"
-            >
+        if (!response.ok) {
+            throw new Error("Could not stop bot");
+        }
 
+        const data = await response.json();
 
-            <label>Stop Loss ($)</label>
+        updateDashboard(data.state);
 
-            <input
-                id="stopLoss"
-                type="number"
-                value="10"
-                step="0.01"
-            >
+        addLog("Bot stopped.");
 
+    } catch (error) {
 
-            <label>Martingale</label>
-
-            <input
-                id="martingale"
-                type="text"
-                value="1,2,4,8"
-            >
+        addLog("ERROR: " + error.message);
+    }
+}
 
 
-            <div class="buttons">
+function updateDashboard(state) {
 
-                <button
-                    id="startButton"
-                    class="start"
-                    onclick="startBot()"
-                >
-                    START BOT
-                </button>
+    $("profit").textContent =
+        "$" + Number(state.profit || 0).toFixed(2);
 
-                <button
-                    id="stopButton"
-                    class="stop"
-                    onclick="stopBot()"
-                >
-                    STOP
-                </button>
+    $("wins").textContent =
+        state.wins || 0;
 
-            </div>
+    $("losses").textContent =
+        state.losses || 0;
 
-        </section>
+    $("botStatus").textContent =
+        state.status || "Ready";
+
+    $("livePrice").textContent = state.price == null ? "--" : String(state.price);
+    $("liveBalance").textContent = state.balance == null ? "--" : "$" + Number(state.balance).toFixed(2);
+    $("livePayout").textContent = state.payout == null ? "--" : Number(state.payout).toFixed(0) + "%";
+    $("liveConnection").textContent = state.connected ? "CONNECTED" : (state.running ? "CONNECTING" : "DISCONNECTED");
+
+    const indicator = $("connectionStatus");
+
+    if (state.connected) {
+
+        indicator.textContent = "CONNECTED";
+
+        indicator.classList.remove("stopped");
+        indicator.classList.add("running");
+
+        $("startButton").disabled = true;
+        $("stopButton").disabled = false;
+
+    } else if (state.running) {
+
+        indicator.textContent = "CONNECTING";
+        indicator.classList.remove("stopped");
+        indicator.classList.add("running");
+        $("startButton").disabled = true;
+        $("stopButton").disabled = false;
+
+    } else {
+
+        indicator.textContent = "STOPPED";
+
+        indicator.classList.remove("running");
+        indicator.classList.add("stopped");
+
+        $("startButton").disabled = false;
+        $("stopButton").disabled = true;
+    }
+}
 
 
-        <section class="panel activity">
+async function loadStatus() {
 
-            <h2>Bot Activity</h2>
+    try {
 
-            <div id="activityLog" class="log">
+        const response = await fetch("/api/status");
 
-                <div class="log-line">
-                    Pocket Bot ready.
-                </div>
+        if (!response.ok) {
+            throw new Error("Server unavailable");
+        }
 
-                <div class="log-line">
-                    Configure your settings and press START BOT.
-                </div>
+        const state = await response.json();
 
-            </div>
+        updateDashboard(state);
 
-        </section>
+    } catch (error) {
 
-    </main>
-
-
-    <footer>
-        Pocket Bot Web
-    </footer>
-
-</div>
+        $("connectionStatus").textContent = "OFFLINE";
+        $("connectionStatus").className = "status stopped";
+    }
+}
 
 
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+loadStatus();
 
-</body>
-</html>
+setInterval(loadStatus, 3000);
