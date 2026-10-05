@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pocket Bot</title>
+
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+
+<div class="app">
+
+    <header>
+        <div>
+            <h1>POCKET BOT</h1>
+            <p>Automated Trading Dashboard</p>
+        </div>
+
+        <div id="connectionStatus" class="status stopped">
+            STOPPED
+        </div>
+    </header>
+
+
+    <section class="stats">
+
+        <div class="stat-card">
+            <span>Profit</span>
+            <strong id="profit">$0.00</strong>
+        </div>
+
+        <div class="stat-card">
+            <span>Wins</span>
+            <strong id="wins">0</strong>
+        </div>
+
+        <div class="stat-card">
+            <span>Losses</span>
+            <strong id="losses">0</strong>
+        </div>
+
+        <div class="stat-card">
+            <span>Status</span>
+            <strong id="botStatus">Ready</strong>
+        </div>
+
+    </section>
+
+
+    <main>
+
+        <section class="panel">
+
+            <h2>Trading Settings</h2>
+
+            <label>Account</label>
+            <select id="mode">
+                <option value="demo">Demo</option>
+                <option value="real">Real</option>
+            </select>
+
+            <label>Asset</label>
+            <select id="asset">
+                <option value="EURUSD_otc">EUR/USD OTC</option>
+                <option value="GBPUSD_otc">GBP/USD OTC</option>
+                <option value="AUDUSD_otc">AUD/USD OTC</option>
+                <option value="USDJPY_otc">USD/JPY OTC</option>
+            </select>
+
+            <label>Timeframe</label>
+            <select id="timeframe">
+                <option value="60">1 Minute</option>
+                <option value="300">5 Minutes</option>
+            </select>
+
+            <label>Trade Amount ($)</label>
+            <input id="amount" type="number" value="1" min="1" step="0.01">
+
+            <label>Minimum Payout (%)</label>
+            <input id="minPayout" type="number" value="80" min="1" max="100">
+
+            <label>Take Profit ($)</label>
+            <input id="takeProfit" type="number" value="10" step="0.01">
+
+            <label>Stop Loss ($)</label>
+            <input id="stopLoss" type="number" value="10" step="0.01">
+
+            <label>Martingale</label>
+            <input id="martingale" type="text" value="1,2,4,8">
+
+            <div class="buttons">
+
+                <button
+                    id="startButton"
+                    class="start"
+                    onclick="startBot()">
+                    START BOT
+                </button>
+
+                <button
+                    id="stopButton"
+                    class="stop"
+                    onclick="stopBot()">
+                    STOP
+                </button>
+
+            </div>
+
+        </section>
+
+
+        <section class="panel activity">
+
+            <h2>Bot Activity</h2>
+
+            <div id="activityLog" class="log">
+
+                <div class="log-line">
+                    Pocket Bot ready.
+                </div>
+
+                <div class="log-line">
+                    Configure your settings and press START BOT.
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+
+    <footer>
+        Pocket Bot Web
+    </footer>
+
+</div>
+
+<script src="/app.js"></script>
+
+</body>
+</html>
