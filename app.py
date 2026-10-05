@@ -1,105 +1,45 @@
 from flask import Flask, jsonify, render_template, request
-from threading import Lock
+from threading import Lock, Thread
 from datetime import datetime, timezone
-import os
-
-from pocket_adapter import pocket
-
-app = Flask(__name__)
-lock = Lock()
-
-state = {
-    "running": False,
-    "connected": False,
-    "mode": "demo",
-    "asset": "EURUSD_otc",
-    "timeframe": 60,
-    "amount": 1.0,
-    "min_payout": 80,
-    "take_profit": 10.0,
-    "stop_loss": 10.0,
-    "martingale": "1,2,4,8",
-    "wins": 0,
-    "losses": 0,
-    "profit": 0.0,
-    "status": "Ready - Demo safety lock",
-    "price": None,
-    "balance": None,
-    "payout": None,
-    "error": None,
-}
-
-
-def current_state():
-    live = pocket.status()
-    with lock:
-        state["running"] = live["running"]
-        state["connected"] = live["connected"]
-        state["price"] = live["price"]
-        state["balance"] = live["balance"]
-        state["payout"] = live["payout"]
-        state["error"] = live["error"]
-        if live["connected"]:
-            state["status"] = "Connected to Pocket Option DEMO"
-        elif live["running"]:
-            state["status"] = "Connecting to Pocket Option..."
-        elif live["error"]:
-            state["status"] = "Connection error"
-        return dict(state)
-
-
+import os, time, random
+app=Flask(__name__); lock=Lock()
+PAIRS=["EUR/USD","GBP/USD","USD/JPY","AUD/USD","USD/CAD","EUR/JPY","GBP/JPY","EUR/GBP"]
+state={"running":False,"status":"Ready","timeframe":300,"min_score":75,"strategies":{"ema":True,"rsi":True,"bollinger":True,"candles":True,"levels":True},"last_scan":None,"opportunities":[],"scanned":0,"source":"Scanner ready — live market feed not connected yet"}
+def score(pair):
+ r=random.Random(sum(map(ord,pair))+int(time.time()//300)); a,b,rsi,bb,candle,level=[r.uniform(-1,1),r.uniform(-1,1),r.uniform(25,75),r.uniform(-1,1),r.uniform(-1,1),r.uniform(-1,1)]; v=[]; reasons=[]; s=state["strategies"]
+ if s["ema"]: v.append((1 if a>b else -1,28)); reasons.append("EMA trend")
+ if s["rsi"]: v.append((1 if rsi<48 else (-1 if rsi>52 else 0),20)); reasons.append(f"RSI {rsi:.0f}")
+ if s["bollinger"]: v.append((1 if bb<-.15 else (-1 if bb>.15 else 0),16)); reasons.append("Bollinger")
+ if s["candles"]: v.append((1 if candle>.12 else (-1 if candle<-.12 else 0),20)); reasons.append("Candles")
+ if s["levels"]: v.append((1 if level>.15 else (-1 if level<-.15 else 0),16)); reasons.append("S/R levels")
+ signed=sum(x*w for x,w in v); total=max(1,sum(w for _,w in v))
+ return {"pair":pair,"direction":"UP" if signed>=0 else "DOWN","score":round(50+50*abs(signed)/total),"timeframe":"5 min" if state["timeframe"]==300 else "1 min","reasons":reasons[:3],"data_mode":"SIMULATION"}
+def scan():
+ x=sorted([score(p) for p in PAIRS],key=lambda q:q["score"],reverse=True)
+ with lock: state["opportunities"]=[q for q in x if q["score"]>=state["min_score"]][:3]; state["scanned"]=len(x); state["last_scan"]=datetime.now(timezone.utc).isoformat()
+def loop():
+ while True:
+  if state["running"]: scan()
+  time.sleep(15)
+Thread(target=loop,daemon=True).start()
 @app.get("/")
-def home():
-    return render_template("index.html")
-
-
+def home(): return render_template("index.html")
 @app.get("/api/status")
-def status():
-    return jsonify(current_state())
-
-
+def status(): return jsonify(state)
 @app.post("/api/config")
 def config():
-    data = request.get_json(silent=True) or {}
-    if data.get("mode", "demo") != "demo":
-        return jsonify({"ok": False, "error": "This build is locked to Demo mode"}), 400
-
-    allowed = {"asset", "timeframe", "amount", "min_payout", "take_profit", "stop_loss", "martingale"}
-    with lock:
-        state["mode"] = "demo"
-        for key in allowed:
-            if key in data:
-                state[key] = data[key]
-    return jsonify({"ok": True, "state": current_state()})
-
-
+ d=request.get_json(silent=True) or {}
+ with lock:
+  if "timeframe" in d: state["timeframe"]=int(d["timeframe"])
+  if "min_score" in d: state["min_score"]=max(50,min(100,int(d["min_score"])))
+  if isinstance(d.get("strategies"),dict):
+   for k in state["strategies"]:
+    if k in d["strategies"]: state["strategies"][k]=bool(d["strategies"][k])
+ return jsonify({"ok":True,"state":state})
 @app.post("/api/start")
-def start():
-    with lock:
-        asset = state["asset"]
-        timeframe = int(state["timeframe"])
-    try:
-        pocket.start(asset, timeframe)
-        return jsonify({"ok": True, "state": current_state()})
-    except Exception as exc:
-        with lock:
-            state["error"] = str(exc)
-            state["status"] = "Configuration error"
-        return jsonify({"ok": False, "error": str(exc), "state": current_state()}), 400
-
-
+def start(): state["running"]=True; state["status"]="Scanning"; scan(); return jsonify({"ok":True,"state":state})
 @app.post("/api/stop")
-def stop():
-    pocket.stop()
-    with lock:
-        state["status"] = "Stopped"
-    return jsonify({"ok": True, "state": current_state()})
-
-
+def stop(): state["running"]=False; state["status"]="Stopped"; return jsonify({"ok":True,"state":state})
 @app.get("/health")
-def health():
-    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+def health(): return jsonify({"status":"ok"})
+if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.getenv("PORT","8080")))
