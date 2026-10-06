@@ -8,6 +8,8 @@ import math
 import os
 import time
 import urllib.request
+import sqlite3
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Lock, Thread, Event
@@ -214,27 +216,41 @@ INDICATORS = {  # key: (الاسم, الوزن, الدالة)
 
 
 def analyze(pair, candles, strategies, tf, mode_label):
+    """Consensus score: only indicators that emit an active directional signal count.
+    A setup is valid only when every active selected indicator agrees on one direction.
+    Neutral indicators do not fake confidence; they make the setup incomplete.
+    """
     cl = [x["c"] for x in candles]
-    votes, reasons = [], []
-    for key, (_, weight, fn) in INDICATORS.items():
+    selected, active, reasons = 0, [], []
+    for key, (_, _weight, fn) in INDICATORS.items():
         if not strategies.get(key):
             continue
+        selected += 1
         try:
             d, why = fn(candles, cl)
         except Exception:
             d, why = 0, None
-        votes.append((d, weight))
-        reasons.append((d, why))
-    total = sum(w for _, w in votes) or 1
-    signed = sum(d * w for d, w in votes) or 1e-9  # تعادل = بدون اتجاه، السكور يطلع منخفض
-    reasons = [why for d, why in reasons if why and d and (d > 0) == (signed > 0)]
-    agree = sum(w for d, w in votes if d and (d > 0) == (signed > 0))
-    agreeing = sum(1 for d, _ in votes if d and (d > 0) == (signed > 0))
+        if d:
+            active.append((key, d))
+            if why:
+                reasons.append((d, why))
+    if not selected or not active:
+        return None
+    up = sum(1 for _, d in active if d > 0)
+    down = sum(1 for _, d in active if d < 0)
+    direction = 1 if up > down else (-1 if down > up else 0)
+    if not direction:
+        return None
+    agreeing = up if direction > 0 else down
+    # score = transparent agreement ratio, not a claimed win probability
+    score = round(100 * agreeing / selected)
+    unanimous = agreeing == selected
+    why = [txt for d, txt in reasons if d == direction]
     return {
-        "pair": pair, "direction": "UP" if signed > 0 else "DOWN",
-        "score": round(100 * agree / total), "agree": f"{agreeing}/{len(votes)}",
+        "pair": pair, "direction": "UP" if direction > 0 else "DOWN",
+        "score": score, "agree": f"{agreeing}/{selected}", "unanimous": unanimous,
         "price": round(cl[-1], 5), "timeframe": "1 min" if tf == 60 else "5 min",
-        "reasons": reasons[:6], "data_mode": mode_label, "candle_time": candles[-1]["t"],
+        "reasons": why[:8], "data_mode": mode_label, "candle_time": candles[-1]["t"],
     }
 
 
@@ -244,10 +260,56 @@ state = {
     "timeframe": 300, "min_score": 65,
     "strategies": {k: True for k in INDICATORS},
     "indicator_names": {k: v[0] for k, v in INDICATORS.items()},
-    "last_scan": None, "next_scan": None, "opportunities": [], "closest": [],
+    "last_scan": None, "next_scan": None, "opportunities": [],
     "scanned": 0, "failed": 0, "market_open": None,
     "otc_pairs": [], "quota_text": None, "budget_note": None,
 }
+
+# ---------------- سجل الإشارات والنتائج ----------------
+DB_PATH = os.getenv("RADAR_DB", "/tmp/trade_radar.sqlite3")
+
+def db_conn():
+    c = sqlite3.connect(DB_PATH, timeout=10)
+    c.row_factory = sqlite3.Row
+    c.execute("""CREATE TABLE IF NOT EXISTS signals(
+        id TEXT PRIMARY KEY, pair TEXT, direction TEXT, score INTEGER, entry REAL,
+        opened_at INTEGER, expires_at INTEGER, timeframe INTEGER, mode TEXT,
+        reasons TEXT, status TEXT DEFAULT 'OPEN', exit REAL, closed_at INTEGER,
+        result TEXT)""")
+    c.commit()
+    return c
+
+def log_signal(o, tf, mode):
+    opened = int(o["candle_time"])
+    sid = f"{mode}:{o['pair']}:{tf}:{opened}:{o['direction']}"
+    with db_conn() as c:
+        c.execute("INSERT OR IGNORE INTO signals(id,pair,direction,score,entry,opened_at,expires_at,timeframe,mode,reasons) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  (sid,o["pair"],o["direction"],o["score"],o["price"],opened,opened+tf,tf,mode,json.dumps(o["reasons"])))
+
+def recent_signals(limit=80):
+    with db_conn() as c:
+        rows=c.execute("SELECT * FROM signals ORDER BY opened_at DESC LIMIT ?",(limit,)).fetchall()
+    return [dict(r) | {"reasons": json.loads(r["reasons"] or "[]")} for r in rows]
+
+def settle_from_candles(pair, candles, mode):
+    with db_conn() as c:
+        rows=c.execute("SELECT * FROM signals WHERE status='OPEN' AND pair=? AND mode=?",(pair,mode)).fetchall()
+        for r in rows:
+            target=r["expires_at"]
+            bar=next((x for x in candles if x["t"] >= target), None)
+            if not bar: continue
+            exitp=float(bar["c"]); entry=float(r["entry"])
+            if exitp == entry: result="DRAW"
+            elif (r["direction"]=="UP" and exitp>entry) or (r["direction"]=="DOWN" and exitp<entry): result="WIN"
+            else: result="LOSS"
+            c.execute("UPDATE signals SET status='CLOSED',exit=?,closed_at=?,result=? WHERE id=?",(exitp,int(bar["t"]),result,r["id"]))
+        c.commit()
+
+def performance():
+    with db_conn() as c:
+        r=c.execute("SELECT COUNT(*) n, SUM(result='WIN') w, SUM(result='LOSS') l, SUM(result='DRAW') d FROM signals WHERE status='CLOSED'").fetchone()
+    n=r["n"] or 0; w=r["w"] or 0
+    return {"closed":n,"wins":w,"losses":r["l"] or 0,"draws":r["d"] or 0,"win_rate":round(100*w/n,1) if n else None}
 
 # ---------------- مصدر OTC ----------------
 _otc_client = None
@@ -342,6 +404,7 @@ def scan():
             candles = fetch(sym, tf)
             if len(candles) < 60:
                 return None
+            settle_from_candles(name, candles, mode)
             return analyze(name, candles, strategies, tf, label)
         except Exception as e:
             if otcharts and isinstance(e, (otcharts.QuotaExceeded, otcharts.AuthError)):
@@ -357,10 +420,11 @@ def scan():
     now = time.time()
     fresh = [r for r in ok if now - r["candle_time"] < STALE_SECONDS] if mode == "real" else ok
     ranked = sorted(fresh, key=lambda r: r["score"], reverse=True)
-    best = [r for r in ranked if r["score"] >= min_score][:3]
+    best = [r for r in ranked if r["unanimous"] and r["score"] >= min_score][:3]
+    for r in best:
+        log_signal(r, tf, mode)
     with lock:
         state["opportunities"] = best
-        state["closest"] = [] if best else ranked[:3]
         state["scanned"] = len(ok)
         state["failed"] = results.count(None)
         state["market_open"] = (bool(fresh) if ok else None) if mode == "real" else True
@@ -441,7 +505,10 @@ def status():
     if need:
         refresh_usage()
     with lock:
-        return jsonify(state)
+        payload = dict(state)
+    payload["signals"] = recent_signals()
+    payload["performance"] = performance()
+    return jsonify(payload)
 
 
 @app.post("/api/config")
@@ -449,7 +516,7 @@ def config():
     d = request.get_json(silent=True) or {}
     with lock:
         if d.get("mode") in SOURCES and d["mode"] != state["mode"]:
-            state.update(mode=d["mode"], source=SOURCES[d["mode"]], opportunities=[], closest=[], last_scan=None,
+            state.update(mode=d["mode"], source=SOURCES[d["mode"]], opportunities=[], last_scan=None,
                          next_scan=None, budget_note=None)
         if "timeframe" in d and int(d["timeframe"]) in (60, 300) and int(d["timeframe"]) != state["timeframe"]:
             state["timeframe"], state["next_scan"] = int(d["timeframe"]), None
