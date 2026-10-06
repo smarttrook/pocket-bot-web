@@ -280,7 +280,7 @@ def db_conn():
     return c
 
 def log_signal(o, tf, mode):
-    opened = int(o["candle_time"])
+    opened = int(time.time())  # actual moment the radar publishes the signal
     sid = f"{mode}:{o['pair']}:{tf}:{opened}:{o['direction']}"
     with db_conn() as c:
         c.execute("INSERT OR IGNORE INTO signals(id,pair,direction,score,entry,opened_at,expires_at,timeframe,mode,reasons) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -298,7 +298,7 @@ def settle_from_candles(pair, candles, mode):
             target=r["expires_at"]
             bar=next((x for x in candles if x["t"] >= target), None)
             if not bar: continue
-            exitp=float(bar["c"]); entry=float(r["entry"])
+            exitp=float(bar["o"]); entry=float(r["entry"])  # opening price of first bar at/after expiry; avoids using a future candle close
             if exitp == entry: result="DRAW"
             elif (r["direction"]=="UP" and exitp>entry) or (r["direction"]=="DOWN" and exitp<entry): result="WIN"
             else: result="LOSS"
