@@ -1,3 +1,4 @@
 Flask==3.1.0
 gunicorn==23.0.0
 otcharts==0.6.1
+pywebpush==2.0.3

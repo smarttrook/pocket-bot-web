@@ -14,7 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Lock, Thread, Event
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
+
+try:
+    from pywebpush import webpush, WebPushException
+except ImportError:
+    webpush = None
+    WebPushException = Exception
 
 try:
     import otcharts
@@ -267,6 +273,9 @@ state = {
 
 # ---------------- سجل الإشارات والنتائج ----------------
 DB_PATH = os.getenv("RADAR_DB", "/tmp/trade_radar.sqlite3")
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:radar@localhost").strip()
 
 def db_conn():
     c = sqlite3.connect(DB_PATH, timeout=10)
@@ -276,15 +285,50 @@ def db_conn():
         opened_at INTEGER, expires_at INTEGER, timeframe INTEGER, mode TEXT,
         reasons TEXT, status TEXT DEFAULT 'OPEN', exit REAL, closed_at INTEGER,
         result TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS push_subscriptions(
+        endpoint TEXT PRIMARY KEY, subscription TEXT NOT NULL, created_at INTEGER NOT NULL)""")
     c.commit()
     return c
+
+def push_enabled():
+    return bool(webpush and VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
+
+def send_signal_push(o, tf):
+    """Send at most one push per newly inserted signal. scan() already caps signals at 3."""
+    if not push_enabled():
+        return
+    arrow = "↑" if o["direction"] == "UP" else "↓"
+    payload = json.dumps({
+        "title": f"{o['pair']} {arrow} {o['score']}%",
+        "body": f"Trade Radar · {tf // 60} min · Entry {o['price']}",
+        "tag": f"radar-{o['pair']}-{o['direction']}",
+        "url": "/"
+    })
+    with db_conn() as c:
+        rows = c.execute("SELECT endpoint,subscription FROM push_subscriptions").fetchall()
+    dead=[]
+    for r in rows:
+        try:
+            webpush(subscription_info=json.loads(r["subscription"]), data=payload,
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": VAPID_SUBJECT}, ttl=300)
+        except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status in (404, 410): dead.append(r["endpoint"])
+    if dead:
+        with db_conn() as c:
+            c.executemany("DELETE FROM push_subscriptions WHERE endpoint=?", [(x,) for x in dead])
+            c.commit()
 
 def log_signal(o, tf, mode):
     opened = int(time.time())  # actual moment the radar publishes the signal
     sid = f"{mode}:{o['pair']}:{tf}:{opened}:{o['direction']}"
     with db_conn() as c:
-        c.execute("INSERT OR IGNORE INTO signals(id,pair,direction,score,entry,opened_at,expires_at,timeframe,mode,reasons) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        cur=c.execute("INSERT OR IGNORE INTO signals(id,pair,direction,score,entry,opened_at,expires_at,timeframe,mode,reasons) VALUES(?,?,?,?,?,?,?,?,?,?)",
                   (sid,o["pair"],o["direction"],o["score"],o["price"],opened,opened+tf,tf,mode,json.dumps(o["reasons"])))
+        inserted = cur.rowcount == 1
+    if inserted:
+        Thread(target=send_signal_push, args=(o, tf), daemon=True).start()
 
 def recent_signals(limit=80):
     with db_conn() as c:
@@ -498,6 +542,10 @@ def home():
     return render_template("index.html")
 
 
+@app.get("/sw.js")
+def service_worker():
+    return send_from_directory(app.root_path, "static_sw.js", mimetype="application/javascript")
+
 @app.get("/api/status")
 def status():
     with lock:
@@ -528,6 +576,33 @@ def config():
                     state["strategies"][k] = bool(d["strategies"][k])
     return jsonify({"ok": True})
 
+
+@app.get("/api/push/config")
+def push_config():
+    return jsonify({"enabled": push_enabled(), "public_key": VAPID_PUBLIC_KEY if push_enabled() else ""})
+
+@app.post("/api/push/subscribe")
+def push_subscribe():
+    if not push_enabled():
+        return jsonify({"ok": False, "error": "Push server keys are not configured"}), 503
+    sub=request.get_json(silent=True) or {}
+    endpoint=sub.get("endpoint")
+    if not endpoint:
+        return jsonify({"ok":False,"error":"Invalid subscription"}),400
+    with db_conn() as c:
+        c.execute("INSERT OR REPLACE INTO push_subscriptions(endpoint,subscription,created_at) VALUES(?,?,?)",
+                  (endpoint,json.dumps(sub),int(time.time())))
+        c.commit()
+    return jsonify({"ok":True})
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe():
+    sub=request.get_json(silent=True) or {}
+    endpoint=sub.get("endpoint")
+    if endpoint:
+        with db_conn() as c:
+            c.execute("DELETE FROM push_subscriptions WHERE endpoint=?",(endpoint,)); c.commit()
+    return jsonify({"ok":True})
 
 @app.post("/api/start")
 def start():
