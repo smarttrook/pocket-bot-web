@@ -17,17 +17,19 @@ header p{color:#8e9aad;margin:4px 0 0}
 .notice,.controls,.strategy-box,.summary,.card,.empty{background:#131923;border:1px solid #252e3c;border-radius:15px}
 .notice{padding:14px;margin:14px 0;color:#c7d0de;font-size:13px;line-height:1.6}
 .status-line{margin-top:6px;color:#ffca68;font-weight:700}
-.quota{margin-top:4px;color:#8e9aad;font-size:12px}
-.full{grid-column:1/-1}
+.sub{margin-top:4px;color:#8e9aad;font-size:12px}
 .controls{padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end}
 .controls label{display:block;color:#9ba7b8;font-size:12px;margin-bottom:6px}
+.full{grid-column:1/-1}
 select,input{width:100%;padding:11px;border-radius:9px;border:1px solid #303b4d;background:#0b1018;color:#fff;font-size:16px}
 button{padding:13px 16px;border:0;border-radius:10px;background:#5269ff;color:#fff;font-weight:800;font-size:15px;-webkit-appearance:none;appearance:none;cursor:pointer}
-button:disabled{opacity:.5}
 .secondary{background:#29313f}
-.strategy-box{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;margin-top:12px;color:#bdc6d5}
-.strategy-box label{display:flex;align-items:center;gap:8px}
-.strategy-box input{width:18px;height:18px;margin:0}
+.strategy-box{padding:14px;margin-top:12px;color:#bdc6d5}
+.sb-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:#9ba7b8;font-size:12px}
+.sb-head a{color:#8ea0ff;cursor:pointer;text-decoration:none}
+.sb-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sb-grid label{display:flex;align-items:center;gap:8px}
+.sb-grid input{width:18px;height:18px;margin:0;flex:none}
 .summary{margin:12px 0;padding:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:#94a0b2}
 .cards{display:grid;gap:12px}
 .card{padding:18px}
@@ -41,6 +43,8 @@ button:disabled{opacity:.5}
 .reason{display:inline-block;background:#0c1119;border:1px solid #273142;border-radius:8px;padding:6px 8px;margin:8px 5px 0 0;font-size:12px}
 .mode{margin-top:12px;color:#4ae19a;font-size:11px;font-weight:800}
 .empty{padding:35px;text-align:center;color:#7f8a9b}
+.dim{opacity:.55}
+.hint{padding:14px;text-align:center;color:#ffca68;font-size:13px;background:#131923;border:1px solid #252e3c;border-radius:15px}
 </style>
 </head>
 <body>
@@ -53,108 +57,103 @@ button:disabled{opacity:.5}
   <div class="notice">
     <b>Market feed:</b> <span id="source">—</span>
     <div id="statusText" class="status-line">Ready</div>
-    <div id="quota" class="quota"></div>
+    <div id="budget" class="sub"></div>
+    <div id="quota" class="sub"></div>
   </div>
 
   <section class="controls">
     <div class="full"><label>Market</label>
-      <select id="mode"><option value="otc">Pocket Option OTC (manual scan)</option><option value="real">Real market pairs (auto scan)</option></select></div>
+      <select id="mode"><option value="otc">Pocket Option OTC</option><option value="real">Real market pairs</option></select></div>
     <div><label>Timeframe</label>
       <select id="timeframe"><option value="300">5 Minutes</option><option value="60">1 Minute</option></select></div>
-    <div><label>Minimum score</label><input id="minScore" type="number" min="50" max="100" value="75"></div>
-    <button id="startBtn" onclick="startRadar()">START RADAR</button>
+    <div><label>Minimum score</label><input id="minScore" type="number" min="40" max="100" value="65"></div>
+    <button onclick="startRadar()">START RADAR</button>
     <button class="secondary" onclick="stopRadar()">STOP</button>
   </section>
 
   <section class="strategy-box">
-    <label><input type="checkbox" id="ema" checked> EMA 20/50</label>
-    <label><input type="checkbox" id="rsi" checked> RSI</label>
-    <label><input type="checkbox" id="bollinger" checked> Bollinger</label>
-    <label><input type="checkbox" id="candles" checked> Candles</label>
-    <label><input type="checkbox" id="levels" checked> Support / Resistance</label>
+    <div class="sb-head"><span>Indicators (<b id="indCount">0</b>)</span>
+      <span><a onclick="setAll(true)">All</a> · <a onclick="setAll(false)">None</a></span></div>
+    <div id="indicators" class="sb-grid"></div>
   </section>
 
   <div class="summary">
     <span>Scanned: <b id="scanned">0</b></span>
-    <span>Last scan: <b id="lastScan">—</b></span>
+    <span>Last: <b id="lastScan">—</b></span>
+    <span>Next: <b id="nextScan">—</b></span>
   </div>
 
-  <main id="cards" class="cards"><div class="empty">Press the button to scan.</div></main>
+  <main id="cards" class="cards"><div class="empty">Press START RADAR — it scans by itself after that.</div></main>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
+let names = {}, built = false;
 
-function cfg(){
-  return {
-    mode: $("mode").value,
-    timeframe: +$("timeframe").value,
-    min_score: +$("minScore").value,
-    strategies: {ema:$("ema").checked, rsi:$("rsi").checked, bollinger:$("bollinger").checked,
-                 candles:$("candles").checked, levels:$("levels").checked}
-  };
+function strategies(){
+  const o = {};
+  for (const k in names) o[k] = $("i_" + k).checked;
+  return o;
 }
-
+function cfg(){
+  return {mode:$("mode").value, timeframe:+$("timeframe").value, min_score:+$("minScore").value, strategies:strategies()};
+}
 async function post(url, body){
-  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
-                              body: body ? JSON.stringify(body) : null});
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : null});
   return r.json();
 }
-
-async function startRadar(){
-  const btn = $("startBtn");
-  btn.disabled = true; btn.textContent = "SCANNING…";
-  $("statusText").textContent = "Fetching live candles…";
-  try { await post("/api/config", cfg()); await post("/api/start"); }
-  catch(e){ $("statusText").textContent = "Connection error: " + e.message; }
-  btn.disabled = false; setButton();
-  refresh();
-}
-
+async function saveCfg(){ updateCount(); await post("/api/config", cfg()); refresh(); }
+async function startRadar(){ await post("/api/config", cfg()); await post("/api/start"); refresh(); }
 async function stopRadar(){ await post("/api/stop"); refresh(); }
+function setAll(v){ for (const k in names) $("i_" + k).checked = v; saveCfg(); }
+function updateCount(){ $("indCount").textContent = Object.values(strategies()).filter(Boolean).length; }
 
-// أي تغيير في الإعدادات أثناء التشغيل يتطبّق فورًا
-function setButton(){
-  $("startBtn").textContent = $("mode").value === "otc" ? "SCAN NOW" : "START RADAR";
+function build(s){
+  names = s.indicator_names;
+  $("indicators").innerHTML = Object.entries(names).map(([k,n]) =>
+    `<label><input type="checkbox" id="i_${k}" ${s.strategies[k]?"checked":""}> ${n}</label>`).join("");
+  for (const k in names) $("i_" + k).addEventListener("change", saveCfg);
+  $("mode").value = s.mode; $("timeframe").value = s.timeframe; $("minScore").value = s.min_score;
+  ["mode","timeframe","minScore"].forEach(id => $(id).addEventListener("change", saveCfg));
+  updateCount(); built = true;
 }
-$("mode").addEventListener("change", setButton);
 
-["mode","timeframe","minScore","ema","rsi","bollinger","candles","levels"].forEach(id =>
-  $(id).addEventListener("change", () => post("/api/config", cfg())));
+const t = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "—";
 
-let synced = false;
 function render(s){
-  if (!synced){ $("mode").value = s.mode; $("timeframe").value = s.timeframe; $("minScore").value = s.min_score;
-    for (const k in s.strategies) $(k).checked = s.strategies[k]; setButton(); synced = true; }
+  if (!built) build(s);
   $("source").textContent = s.source;
-  $("quota").textContent = s.mode === "otc" && s.quota_text ? s.quota_text : "";
   $("statusText").textContent = s.status + (s.failed ? ` (${s.failed} pairs failed)` : "");
+  $("budget").textContent = s.running && s.budget_note ? s.budget_note : "";
+  $("quota").textContent = s.mode === "otc" && s.quota_text ? s.quota_text : "";
   $("scanned").textContent = s.scanned || 0;
-  $("lastScan").textContent = s.last_scan ? new Date(s.last_scan).toLocaleTimeString() : "—";
+  $("lastScan").textContent = t(s.last_scan);
+  $("nextScan").textContent = s.running && s.next_scan ? t(new Date(s.next_scan * 1000).toISOString()) : "—";
   const b = $("statusBadge");
-  const live = s.running || (s.mode === "otc" && s.last_scan);
-  b.textContent = s.running ? "SCANNING" : (live ? "READY" : "STOPPED");
-  b.className = "badge " + (live ? "running" : "stopped");
+  b.textContent = s.running ? "AUTO" : "STOPPED";
+  b.className = "badge " + (s.running ? "running" : "stopped");
 
-  if (!s.last_scan){ $("cards").innerHTML = '<div class="empty">Press the button to scan.</div>'; return; }
-  if (s.market_open === false){ $("cards").innerHTML = '<div class="empty">Market closed — regular pairs resume when forex opens.</div>'; return; }
-
-  $("cards").innerHTML = s.opportunities && s.opportunities.length
-    ? s.opportunities.map((o,i) => `
-      <article class="card">
+  if (!s.last_scan){ $("cards").innerHTML = '<div class="empty">' + (s.running ? "First scan in progress…" : "Press START RADAR — it scans by itself after that.") + '</div>'; return; }
+  if (s.market_open === false){ $("cards").innerHTML = '<div class="empty">Market closed — switch to Pocket Option OTC.</div>'; return; }
+  const card = (o,i,dim) => `
+      <article class="card ${dim?"dim":""}">
         <div class="top"><div class="pair">#${i+1} ${o.pair}</div><div class="score">${o.score}%</div></div>
         <div class="direction ${o.direction==="UP"?"up":"down"}">${o.direction==="UP"?"↑ UP":"↓ DOWN"}</div>
-        <div class="meta">Expiry: ${o.timeframe} · Price: ${o.price}</div>
+        <div class="meta">Expiry: ${o.timeframe} · Agree: ${o.agree} · Price: ${o.price}</div>
         <div>${o.reasons.map(x=>`<span class="reason">${x}</span>`).join("")}</div>
-        <div class="mode">${o.data_mode}</div>
-      </article>`).join("")
-    : '<div class="empty">No setup meets the minimum score right now.</div>';
+        <div class="mode">${dim ? "BELOW YOUR MINIMUM — NOT A SIGNAL" : o.data_mode}</div>
+      </article>`;
+  if (s.opportunities && s.opportunities.length){
+    $("cards").innerHTML = s.opportunities.map((o,i)=>card(o,i,false)).join("");
+  } else if (s.closest && s.closest.length){
+    $("cards").innerHTML = `<div class="hint">No setup reached ${s.min_score}% — closest ones below (not signals)</div>`
+      + s.closest.map((o,i)=>card(o,i,true)).join("");
+  } else {
+    $("cards").innerHTML = '<div class="empty">No data yet — check the status line above.</div>';
+  }
 }
 
-async function refresh(){
-  try { render(await (await fetch("/api/status")).json()); } catch(e){}
-}
-
+async function refresh(){ try { render(await (await fetch("/api/status")).json()); } catch(e){} }
 refresh();
 setInterval(refresh, 5000);
 </script>
