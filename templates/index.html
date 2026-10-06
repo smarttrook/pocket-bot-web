@@ -1,161 +1,19 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trade Radar</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trade Radar</title>
 <style>
-*{box-sizing:border-box}
-body{margin:0;background:#090d14;color:#fff;font-family:-apple-system,"Segoe UI",Arial,sans-serif}
-.app{max-width:900px;margin:auto;padding:18px}
-header{display:flex;justify-content:space-between;align-items:center;gap:12px}
-h1{margin:0;font-size:28px;letter-spacing:.5px}
-header p{color:#8e9aad;margin:4px 0 0}
-.badge{padding:10px 14px;border-radius:12px;font-weight:800;white-space:nowrap}
-.running{background:#123b2b;color:#49dc91}
-.stopped{background:#411c25;color:#ff6b7e}
-.notice,.controls,.strategy-box,.summary,.card,.empty{background:#131923;border:1px solid #252e3c;border-radius:15px}
-.notice{padding:14px;margin:14px 0;color:#c7d0de;font-size:13px;line-height:1.6}
-.status-line{margin-top:6px;color:#ffca68;font-weight:700}
-.sub{margin-top:4px;color:#8e9aad;font-size:12px}
-.controls{padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end}
-.controls label{display:block;color:#9ba7b8;font-size:12px;margin-bottom:6px}
-.full{grid-column:1/-1}
-select,input{width:100%;padding:11px;border-radius:9px;border:1px solid #303b4d;background:#0b1018;color:#fff;font-size:16px}
-button{padding:13px 16px;border:0;border-radius:10px;background:#5269ff;color:#fff;font-weight:800;font-size:15px;-webkit-appearance:none;appearance:none;cursor:pointer}
-.secondary{background:#29313f}
-.strategy-box{padding:14px;margin-top:12px;color:#bdc6d5}
-.sb-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:#9ba7b8;font-size:12px}
-.sb-head a{color:#8ea0ff;cursor:pointer;text-decoration:none}
-.sb-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.sb-grid label{display:flex;align-items:center;gap:8px}
-.sb-grid input{width:18px;height:18px;margin:0;flex:none}
-.summary{margin:12px 0;padding:12px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:#94a0b2}
-.cards{display:grid;gap:12px}
-.card{padding:18px}
-.top{display:flex;justify-content:space-between;align-items:center}
-.pair{font-size:22px;font-weight:800}
-.score{font-size:20px;font-weight:800}
-.direction{display:inline-block;margin-top:12px;padding:8px 12px;border-radius:9px;font-weight:900}
-.up{background:#123b2b;color:#4ae19a}
-.down{background:#431d25;color:#ff7183}
-.meta{margin-top:10px;color:#9ba7b8;font-size:13px}
-.reason{display:inline-block;background:#0c1119;border:1px solid #273142;border-radius:8px;padding:6px 8px;margin:8px 5px 0 0;font-size:12px}
-.mode{margin-top:12px;color:#4ae19a;font-size:11px;font-weight:800}
-.empty{padding:35px;text-align:center;color:#7f8a9b}
-.dim{opacity:.55}
-.hint{padding:14px;text-align:center;color:#ffca68;font-size:13px;background:#131923;border:1px solid #252e3c;border-radius:15px}
-</style>
-</head>
-<body>
-<div class="app">
-  <header>
-    <div><h1>TRADE RADAR</h1><p>Pocket Option · Top 3 setups</p></div>
-    <div id="statusBadge" class="badge stopped">STOPPED</div>
-  </header>
-
-  <div class="notice">
-    <b>Market feed:</b> <span id="source">—</span>
-    <div id="statusText" class="status-line">Ready</div>
-    <div id="budget" class="sub"></div>
-    <div id="quota" class="sub"></div>
-  </div>
-
-  <section class="controls">
-    <div class="full"><label>Market</label>
-      <select id="mode"><option value="otc">Pocket Option OTC</option><option value="real">Real market pairs</option></select></div>
-    <div><label>Timeframe</label>
-      <select id="timeframe"><option value="300">5 Minutes</option><option value="60">1 Minute</option></select></div>
-    <div><label>Minimum score</label><input id="minScore" type="number" min="40" max="100" value="65"></div>
-    <button onclick="startRadar()">START RADAR</button>
-    <button class="secondary" onclick="stopRadar()">STOP</button>
-  </section>
-
-  <section class="strategy-box">
-    <div class="sb-head"><span>Indicators (<b id="indCount">0</b>)</span>
-      <span><a onclick="setAll(true)">All</a> · <a onclick="setAll(false)">None</a></span></div>
-    <div id="indicators" class="sb-grid"></div>
-  </section>
-
-  <div class="summary">
-    <span>Scanned: <b id="scanned">0</b></span>
-    <span>Last: <b id="lastScan">—</b></span>
-    <span>Next: <b id="nextScan">—</b></span>
-  </div>
-
-  <main id="cards" class="cards"><div class="empty">Press START RADAR — it scans by itself after that.</div></main>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-let names = {}, built = false;
-
-function strategies(){
-  const o = {};
-  for (const k in names) o[k] = $("i_" + k).checked;
-  return o;
-}
-function cfg(){
-  return {mode:$("mode").value, timeframe:+$("timeframe").value, min_score:+$("minScore").value, strategies:strategies()};
-}
-async function post(url, body){
-  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : null});
-  return r.json();
-}
-async function saveCfg(){ updateCount(); await post("/api/config", cfg()); refresh(); }
-async function startRadar(){ await post("/api/config", cfg()); await post("/api/start"); refresh(); }
-async function stopRadar(){ await post("/api/stop"); refresh(); }
-function setAll(v){ for (const k in names) $("i_" + k).checked = v; saveCfg(); }
-function updateCount(){ $("indCount").textContent = Object.values(strategies()).filter(Boolean).length; }
-
-function build(s){
-  names = s.indicator_names;
-  $("indicators").innerHTML = Object.entries(names).map(([k,n]) =>
-    `<label><input type="checkbox" id="i_${k}" ${s.strategies[k]?"checked":""}> ${n}</label>`).join("");
-  for (const k in names) $("i_" + k).addEventListener("change", saveCfg);
-  $("mode").value = s.mode; $("timeframe").value = s.timeframe; $("minScore").value = s.min_score;
-  ["mode","timeframe","minScore"].forEach(id => $(id).addEventListener("change", saveCfg));
-  updateCount(); built = true;
-}
-
-const t = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "—";
-
-function render(s){
-  if (!built) build(s);
-  $("source").textContent = s.source;
-  $("statusText").textContent = s.status + (s.failed ? ` (${s.failed} pairs failed)` : "");
-  $("budget").textContent = s.running && s.budget_note ? s.budget_note : "";
-  $("quota").textContent = s.mode === "otc" && s.quota_text ? s.quota_text : "";
-  $("scanned").textContent = s.scanned || 0;
-  $("lastScan").textContent = t(s.last_scan);
-  $("nextScan").textContent = s.running && s.next_scan ? t(new Date(s.next_scan * 1000).toISOString()) : "—";
-  const b = $("statusBadge");
-  b.textContent = s.running ? "AUTO" : "STOPPED";
-  b.className = "badge " + (s.running ? "running" : "stopped");
-
-  if (!s.last_scan){ $("cards").innerHTML = '<div class="empty">' + (s.running ? "First scan in progress…" : "Press START RADAR — it scans by itself after that.") + '</div>'; return; }
-  if (s.market_open === false){ $("cards").innerHTML = '<div class="empty">Market closed — switch to Pocket Option OTC.</div>'; return; }
-  const card = (o,i,dim) => `
-      <article class="card ${dim?"dim":""}">
-        <div class="top"><div class="pair">#${i+1} ${o.pair}</div><div class="score">${o.score}%</div></div>
-        <div class="direction ${o.direction==="UP"?"up":"down"}">${o.direction==="UP"?"↑ UP":"↓ DOWN"}</div>
-        <div class="meta">Expiry: ${o.timeframe} · Agree: ${o.agree} · Price: ${o.price}</div>
-        <div>${o.reasons.map(x=>`<span class="reason">${x}</span>`).join("")}</div>
-        <div class="mode">${dim ? "BELOW YOUR MINIMUM — NOT A SIGNAL" : o.data_mode}</div>
-      </article>`;
-  if (s.opportunities && s.opportunities.length){
-    $("cards").innerHTML = s.opportunities.map((o,i)=>card(o,i,false)).join("");
-  } else if (s.closest && s.closest.length){
-    $("cards").innerHTML = `<div class="hint">No setup reached ${s.min_score}% — closest ones below (not signals)</div>`
-      + s.closest.map((o,i)=>card(o,i,true)).join("");
-  } else {
-    $("cards").innerHTML = '<div class="empty">No data yet — check the status line above.</div>';
-  }
-}
-
-async function refresh(){ try { render(await (await fetch("/api/status")).json()); } catch(e){} }
-refresh();
-setInterval(refresh, 5000);
-</script>
-</body>
-</html>
+*{box-sizing:border-box}body{margin:0;background:#071019;color:#edf6ff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}.app{max-width:900px;margin:auto;padding:18px}.head{display:flex;justify-content:space-between;align-items:center}.head h1{margin:0;font-size:28px}.muted{color:#8292a5}.badge{padding:10px 14px;border-radius:14px;background:#123d2d;color:#50e3a0;font-weight:900}.panel{background:#101923;border:1px solid #233244;border-radius:18px;padding:15px;margin-top:14px}.radarWrap{display:grid;place-items:center;padding:18px 0}.radar{width:min(78vw,390px);aspect-ratio:1;border-radius:50%;position:relative;overflow:hidden;border:2px solid #1c9c6b;background:radial-gradient(circle,#0b2b25 0 2%,transparent 2.5%),repeating-radial-gradient(circle,transparent 0 19%,#164b3d 20%,transparent 20.7%),linear-gradient(90deg,transparent 49.7%,#164b3d 50%,transparent 50.3%),linear-gradient(transparent 49.7%,#164b3d 50%,transparent 50.3%),#071612;box-shadow:0 0 35px #0c6a4a44 inset}.sweep{position:absolute;inset:50% 50% 0 0;transform-origin:100% 0;background:linear-gradient(25deg,transparent 45%,#48f2ad55);animation:spin 3s linear infinite}.stopped .sweep{animation-play-state:paused}@keyframes spin{to{transform:rotate(360deg)}}.blip{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;text-align:center;background:#071019dd;border:1px solid #44e3a0;border-radius:15px;padding:11px 14px;min-width:170px}.blip b{font-size:20px}.up{color:#50e3a0}.down{color:#ff6f83}.controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{grid-column:1/-1}label{font-size:12px;color:#8fa0b4}select,input{width:100%;margin-top:5px;padding:12px;border:1px solid #304258;border-radius:10px;background:#08111b;color:#fff;font-size:16px}button{border:0;border-radius:11px;padding:13px;background:#5269ff;color:#fff;font-weight:900;font-size:15px}.secondary{background:#293546}.inds{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:10px}.inds label{font-size:15px}.inds input{width:18px;height:18px;margin:0 7px 0 0}.stats{display:flex;justify-content:space-around;text-align:center}.stats b{display:block;font-size:22px}.tabs{display:flex;gap:8px;margin-bottom:12px}.tabs button{flex:1;background:#172434}.tabs button.active{background:#235d49}.row{padding:12px 0;border-bottom:1px solid #223143}.row:last-child{border:0}.rowTop{display:flex;justify-content:space-between;font-weight:800}.small{font-size:12px;color:#8fa0b4;margin-top:5px}.win{color:#50e3a0}.loss{color:#ff6f83}.draw{color:#ffc65c}.empty{text-align:center;color:#7f90a3;padding:20px}.status{color:#ffc65c;font-size:13px;line-height:1.5}
+</style></head><body><div class="app">
+<div class="head"><div><h1>TRADE RADAR</h1><div class="muted">Pocket Option · verified consensus signals</div></div><div id="badge" class="badge">STOPPED</div></div>
+<div class="panel radarWrap"><div id="radar" class="radar stopped"><div class="sweep"></div><div id="blip" class="blip"><b>SCANNING</b><div class="small">waiting for full agreement</div></div></div></div>
+<div class="panel"><div><b>Market feed:</b> <span id="source">—</span></div><div id="status" class="status">Ready</div></div>
+<div class="panel controls"><div class="full"><label>Market<select id="mode"><option value="otc">Pocket Option OTC</option><option value="real">Real market pairs</option></select></label></div><div><label>Timeframe<select id="timeframe"><option value="300">5 Minutes</option><option value="60">1 Minute</option></select></label></div><div><label>Minimum agreement<input id="minScore" type="number" min="40" max="100" value="65"></label></div><button onclick="startRadar()">START RADAR</button><button class="secondary" onclick="stopRadar()">STOP</button></div>
+<div class="panel"><div><b>Indicators</b> <span class="muted">— signal appears only when ALL selected indicators agree</span></div><div id="indicators" class="inds"></div></div>
+<div class="panel stats"><div><b id="closed">0</b><span class="muted">Closed</span></div><div><b id="wins">0</b><span class="muted">Wins</span></div><div><b id="losses">0</b><span class="muted">Losses</span></div><div><b id="wr">—</b><span class="muted">Win rate</span></div></div>
+<div class="panel"><div class="tabs"><button id="tabOpen" class="active" onclick="showTab('open')">Signal log</button><button id="tabClosed" onclick="showTab('closed')">Results</button></div><div id="log"></div></div>
+</div><script>
+const $=x=>document.getElementById(x);let names={},built=false,lastState=null,tab='open';
+function strategies(){let o={};for(const k in names)o[k]=$("i_"+k).checked;return o}function cfg(){return{mode:$("mode").value,timeframe:+$("timeframe").value,min_score:+$("minScore").value,strategies:strategies()}}async function post(u,b){return(await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):null})).json()}async function startRadar(){await post('/api/config',cfg());await post('/api/start');refresh()}async function stopRadar(){await post('/api/stop');refresh()}
+function build(s){names=s.indicator_names;$('indicators').innerHTML=Object.entries(names).map(([k,n])=>`<label><input type="checkbox" id="i_${k}" ${s.strategies[k]?'checked':''}>${n}</label>`).join('');for(const k in names)$("i_"+k).onchange=()=>post('/api/config',cfg());$('mode').value=s.mode;$('timeframe').value=s.timeframe;$('minScore').value=s.min_score;['mode','timeframe','minScore'].forEach(x=>$(x).onchange=()=>post('/api/config',cfg()));built=true}
+function dt(x){return x?new Date(x*1000).toLocaleString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—'}function showTab(x){tab=x;$('tabOpen').className=x==='open'?'active':'';$('tabClosed').className=x==='closed'?'active':'';if(lastState)renderLog(lastState)}
+function renderLog(s){let rows=(s.signals||[]).filter(x=>tab==='open'?x.status==='OPEN':x.status==='CLOSED');$('log').innerHTML=rows.length?rows.map(x=>`<div class="row"><div class="rowTop"><span>${x.pair} · <span class="${x.direction==='UP'?'up':'down'}">${x.direction==='UP'?'↑ UP':'↓ DOWN'}</span></span><span class="${x.result==='WIN'?'win':x.result==='LOSS'?'loss':'draw'}">${x.result||x.score+'%'}</span></div><div class="small">Start ${dt(x.opened_at)} · Entry ${x.entry} · Expiry ${dt(x.expires_at)}${x.exit!=null?' · Close '+x.exit:''}</div><div class="small">${(x.reasons||[]).join(' · ')}</div></div>`).join(''):'<div class="empty">No records yet.</div>'}
+function render(s){lastState=s;if(!built)build(s);$('source').textContent=s.source;$('status').textContent=s.status+(s.budget_note?' · '+s.budget_note:'');$('badge').textContent=s.running?'AUTO':'STOPPED';$('radar').className='radar '+(s.running?'':'stopped');let o=s.opportunities&&s.opportunities[0];$('blip').innerHTML=o?`<b>${o.pair}</b><div class="${o.direction==='UP'?'up':'down'}">${o.direction==='UP'?'↑ UP':'↓ DOWN'} · ${o.score}%</div><div class="small">${o.agree} indicators agree</div>`:'<b>SCANNING</b><div class="small">waiting for full agreement</div>';let p=s.performance||{};$('closed').textContent=p.closed||0;$('wins').textContent=p.wins||0;$('losses').textContent=p.losses||0;$('wr').textContent=p.win_rate==null?'—':p.win_rate+'%';renderLog(s)}async function refresh(){try{render(await(await fetch('/api/status')).json())}catch(e){}}refresh();setInterval(refresh,3000);
+</script></body></html>
