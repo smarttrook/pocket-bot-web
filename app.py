@@ -293,32 +293,44 @@ def db_conn():
 def push_enabled():
     return bool(webpush and VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
 
-def send_signal_push(o, tf):
-    """Send at most one push per newly inserted signal. scan() already caps signals at 3."""
+def send_push_payload(payload):
+    """Send a push payload and return a diagnostic summary instead of hiding errors."""
+    report = {"configured": push_enabled(), "subscriptions": 0, "sent": 0, "failed": 0, "errors": []}
     if not push_enabled():
-        return
-    arrow = "↑" if o["direction"] == "UP" else "↓"
-    payload = json.dumps({
-        "title": f"{o['pair']} {arrow} {o['score']}%",
-        "body": f"Trade Radar · {tf // 60} min · Entry {o['price']}",
-        "tag": f"radar-{o['pair']}-{o['direction']}",
-        "url": "/"
-    })
+        report["errors"].append("Push server keys/library are not configured")
+        return report
     with db_conn() as c:
         rows = c.execute("SELECT endpoint,subscription FROM push_subscriptions").fetchall()
-    dead=[]
+    report["subscriptions"] = len(rows)
+    dead = []
     for r in rows:
         try:
-            webpush(subscription_info=json.loads(r["subscription"]), data=payload,
+            webpush(subscription_info=json.loads(r["subscription"]), data=json.dumps(payload),
                     vapid_private_key=VAPID_PRIVATE_KEY,
                     vapid_claims={"sub": VAPID_SUBJECT}, ttl=300)
+            report["sent"] += 1
         except Exception as e:
+            report["failed"] += 1
             status = getattr(getattr(e, "response", None), "status_code", None)
-            if status in (404, 410): dead.append(r["endpoint"])
+            detail = f"HTTP {status}: {e}" if status else str(e)
+            report["errors"].append(detail[:240])
+            if status in (404, 410):
+                dead.append(r["endpoint"])
     if dead:
         with db_conn() as c:
             c.executemany("DELETE FROM push_subscriptions WHERE endpoint=?", [(x,) for x in dead])
             c.commit()
+    return report
+
+
+def send_signal_push(o, tf):
+    arrow = "↑" if o["direction"] == "UP" else "↓"
+    return send_push_payload({
+        "title": f"{o['pair']} {arrow} {o['score']}%",
+        "body": f"Trade Radar · {tf // 60} min · Entry {o['price']}",
+        "tag": f"radar-{o['pair']}-{o['direction']}-{int(time.time())}",
+        "url": "/"
+    })
 
 def log_signal(o, tf, mode):
     opened = int(time.time())  # actual moment the radar publishes the signal
@@ -594,6 +606,17 @@ def push_subscribe():
                   (endpoint,json.dumps(sub),int(time.time())))
         c.commit()
     return jsonify({"ok":True})
+
+@app.post("/api/push/test")
+def push_test():
+    report = send_push_payload({
+        "title": "Trade Radar — Test",
+        "body": "Notifications are working correctly ✅",
+        "tag": f"radar-test-{int(time.time())}",
+        "url": "/"
+    })
+    ok = report["sent"] > 0 and report["failed"] == 0
+    return jsonify({"ok": ok, **report}), (200 if ok else 503)
 
 @app.post("/api/push/unsubscribe")
 def push_unsubscribe():
