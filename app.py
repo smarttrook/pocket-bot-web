@@ -275,7 +275,8 @@ state = {
 DB_PATH = os.getenv("RADAR_DB", "/tmp/trade_radar.sqlite3")
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip()
-VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:radar@localhost").strip()
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "https://web-production-d2bd1.up.railway.app").strip()
+VAPID_PEM_PATH = "/tmp/trade_radar_vapid_private.pem"
 
 def db_conn():
     c = sqlite3.connect(DB_PATH, timeout=10)
@@ -290,8 +291,42 @@ def db_conn():
     c.commit()
     return c
 
+def _b64url_decode(value):
+    import base64
+    value = value.strip()
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+def _prepare_vapid_private_key():
+    """Convert Railway's URL-safe raw P-256 private scalar to PEM for pywebpush.
+    pywebpush/py-vapid is most reliable when handed a PEM file path.
+    """
+    if not VAPID_PRIVATE_KEY:
+        return None
+    try:
+        # Also allow a PEM value in the environment in future.
+        if "BEGIN PRIVATE KEY" in VAPID_PRIVATE_KEY or "BEGIN EC PRIVATE KEY" in VAPID_PRIVATE_KEY:
+            pem = VAPID_PRIVATE_KEY.replace("\\n", "\n").encode()
+        else:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import serialization
+            raw = _b64url_decode(VAPID_PRIVATE_KEY)
+            if len(raw) != 32:
+                raise ValueError("VAPID private key must decode to 32 bytes")
+            key = ec.derive_private_key(int.from_bytes(raw, "big"), ec.SECP256R1())
+            pem = key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        with open(VAPID_PEM_PATH, "wb") as f:
+            f.write(pem)
+        os.chmod(VAPID_PEM_PATH, 0o600)
+        return VAPID_PEM_PATH
+    except Exception:
+        return None
+
 def push_enabled():
-    return bool(webpush and VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
+    return bool(webpush and VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY and _prepare_vapid_private_key())
 
 def send_push_payload(payload):
     """Send a push payload and return a diagnostic summary instead of hiding errors."""
@@ -306,7 +341,7 @@ def send_push_payload(payload):
     for r in rows:
         try:
             webpush(subscription_info=json.loads(r["subscription"]), data=json.dumps(payload),
-                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_private_key=_prepare_vapid_private_key(),
                     vapid_claims={"sub": VAPID_SUBJECT}, ttl=300)
             report["sent"] += 1
         except Exception as e:
