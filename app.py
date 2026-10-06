@@ -255,7 +255,7 @@ def analyze(pair, candles, strategies, tf, mode_label):
     return {
         "pair": pair, "direction": "UP" if direction > 0 else "DOWN",
         "score": score, "agree": f"{agreeing}/{selected}", "unanimous": unanimous,
-        "price": round(cl[-1], 5), "timeframe": "1 min" if tf == 60 else "5 min",
+        "price": round(cl[-1], 5), "timeframe": "5 min",
         "reasons": why[:8], "data_mode": mode_label, "candle_time": candles[-1]["t"],
     }
 
@@ -566,8 +566,8 @@ def config():
         if d.get("mode") in SOURCES and d["mode"] != state["mode"]:
             state.update(mode=d["mode"], source=SOURCES[d["mode"]], opportunities=[], last_scan=None,
                          next_scan=None, budget_note=None)
-        if "timeframe" in d and int(d["timeframe"]) in (60, 300) and int(d["timeframe"]) != state["timeframe"]:
-            state["timeframe"], state["next_scan"] = int(d["timeframe"]), None
+        # V2.4 is intentionally fixed to five-minute signals only.
+        state["timeframe"] = 300
         if "min_score" in d:
             state["min_score"] = max(40, min(100, int(d["min_score"])))
         if isinstance(d.get("strategies"), dict):
@@ -606,10 +606,17 @@ def push_unsubscribe():
 
 @app.post("/api/start")
 def start():
+    # Never publish a signal in the middle of a 5-minute window.
+    # Starting at e.g. 16:42 waits for the 16:45 boundary (+3 s for the candle/feed to settle).
+    now = time.time()
+    next_bar = (math.floor(now / 300) + 1) * 300 + 3
+    local_next = datetime.fromtimestamp(next_bar).strftime("%H:%M")
     with lock:
-        state.update(running=True, status="Starting…", next_scan=None)
+        state.update(running=True, timeframe=300, opportunities=[],
+                     status=f"Waiting for next 5-minute window · {local_next}",
+                     next_scan=next_bar, budget_note=None)
     wake.set()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "next_scan": next_bar})
 
 
 @app.post("/api/stop")
