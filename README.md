@@ -1,6 +1,7 @@
 # Trade Radar — Railway build
-Two markets:
-- Pocket Option OTC: real OTC candles from OTCharts (needs OTCHARTS_API_KEY in Railway Variables). Manual scan to save requests.
-- Real market pairs: Yahoo Finance candles, auto scan (weekdays only).
-Indicators: EMA 20/50, RSI, Bollinger, Candles, Support/Resistance. Top 3 setups above the minimum score.
-Files go at the repository root. CSS and JS are inside templates/index.html.
+Auto-scanning radar with 11 indicators: EMA 20/50, MACD, ADX/DMI, Supertrend, RSI, Stochastic,
+CCI, Williams %R, Bollinger, Candles, Support/Resistance. Shows the top 3 setups above the minimum score.
+Markets:
+- Pocket Option OTC via OTCharts (OTCHARTS_API_KEY in Railway Variables). Scan rate adapts to the plan's remaining requests.
+- Real market pairs via Yahoo Finance (weekdays only).
+Optional: MAX_OTC_PAIRS (default 20).
