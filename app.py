@@ -221,51 +221,94 @@ INDICATORS = {  # key: (الاسم, الوزن, الدالة)
 }
 
 
+# Strategy signals are deterministic rules on CLOSED candles, not estimated win probabilities.
+STRATEGY_NAMES = {
+    "trook": "تروك — اتجاه وزخم",
+    "candle_radar": "مدار الشموع — 3 جنود / 3 غربان",
+    "heikin": "ريمونتادا هيكاشي — كسر كاذب",
+    "engulf": "الابتلاع — تأكيد الاتجاه",
+    "morning": "نجمة الصباح والمساء",
+    "pin": "بن بار المؤكد",
+    "marubozu": "ماروبوزو — شموع قوية",
+}
+
+def strategy_signals(c):
+    # Use fully closed bars only. Exclude the current potentially incomplete candle.
+    if len(c) < 65:
+        return {}
+    cl = [x["c"] for x in c]
+    a,b,d = c[-3:]
+    sign = lambda x: 1 if x["c"] > x["o"] else (-1 if x["c"] < x["o"] else 0)
+    body = lambda x: abs(x["c"]-x["o"])
+    span = lambda x: max(x["h"]-x["l"], 1e-12)
+    lower = lambda x: min(x["o"],x["c"])-x["l"]
+    upper = lambda x: x["h"]-max(x["o"],x["c"])
+    result={}
+    # Trook: EMA trend, MACD confirmation, ADX trend strength.
+    ed,_=ind_ema(c,cl); md,_=ind_macd(c,cl); ad,_=ind_adx(c,cl)
+    if ed and ed==md==ad:
+        result["trook"]=(ed,"EMA20/50 + MACD + ADX agree")
+    # Three consecutive candles with progressively extending closes.
+    if sign(a)==sign(b)==sign(d)!=0 and all(body(x)/span(x)>=0.45 for x in (a,b,d)):
+        direction=sign(d)
+        if (direction==1 and a["c"]<b["c"]<d["c"]) or (direction==-1 and a["c"]>b["c"]>d["c"]):
+            result["candle_radar"]=(direction,"Three soldiers / three crows")
+    # Inside bar followed by false break and reclaim (two closed bars).
+    prev_range=c[-5:-2]
+    hi=max(x["h"] for x in prev_range); lo=min(x["l"] for x in prev_range)
+    if b["h"]>hi and d["c"]<hi and d["c"]<d["o"]:
+        result["heikin"]=(-1,"False break above range + bearish confirmation")
+    elif b["l"]<lo and d["c"]>lo and d["c"]>d["o"]:
+        result["heikin"]=(1,"False break below range + bullish confirmation")
+    # Engulfing with previous candle and same-direction close confirmation.
+    if sign(a)==-1 and sign(b)==1 and b["o"]<=a["c"] and b["c"]>=a["o"] and sign(d)==1:
+        result["engulf"]=(1,"Bullish engulfing + confirmation")
+    elif sign(a)==1 and sign(b)==-1 and b["o"]>=a["c"] and b["c"]<=a["o"] and sign(d)==-1:
+        result["engulf"]=(-1,"Bearish engulfing + confirmation")
+    # Three-candle morning/evening star; gap not required in FX.
+    if body(a)/span(a)>.5 and body(b)/span(b)<.35 and body(d)/span(d)>.5:
+        midpoint=(a["o"]+a["c"])/2
+        if sign(a)==-1 and sign(d)==1 and d["c"]>midpoint:
+            result["morning"]=(1,"Morning star + closing confirmation")
+        elif sign(a)==1 and sign(d)==-1 and d["c"]<midpoint:
+            result["morning"]=(-1,"Evening star + closing confirmation")
+    # Pin bar requires next candle confirmation.
+    if lower(b)>2.5*max(body(b),1e-12) and upper(b)<lower(b)*.4 and sign(d)==1 and d["c"]>b["h"]:
+        result["pin"]=(1,"Bullish pin bar + break of high")
+    elif upper(b)>2.5*max(body(b),1e-12) and lower(b)<upper(b)*.4 and sign(d)==-1 and d["c"]<b["l"]:
+        result["pin"]=(-1,"Bearish pin bar + break of low")
+    # Marubozu: two high-body, low-wick bars in same direction.
+    if sign(b)==sign(d)!=0 and all(body(x)/span(x)>=.80 for x in (b,d)):
+        result["marubozu"]=(sign(d),"Two strong marubozu-style candles")
+    return result
+
+
 def analyze(pair, candles, strategies, tf, mode_label):
-    """Consensus score: only indicators that emit an active directional signal count.
-    A setup is valid only when every active selected indicator agrees on one direction.
-    Neutral indicators do not fake confidence; they make the setup incomplete.
-    """
-    cl = [x["c"] for x in candles]
-    selected, active, reasons = 0, [], []
-    for key, (_, _weight, fn) in INDICATORS.items():
-        if not strategies.get(key):
-            continue
-        selected += 1
-        try:
-            d, why = fn(candles, cl)
-        except Exception:
-            d, why = 0, None
-        if d:
-            active.append((key, d))
-            if why:
-                reasons.append((d, why))
-    if not selected or not active:
-        return None
-    up = sum(1 for _, d in active if d > 0)
-    down = sum(1 for _, d in active if d < 0)
-    direction = 1 if up > down else (-1 if down > up else 0)
-    if not direction:
-        return None
-    agreeing = up if direction > 0 else down
-    # score = transparent agreement ratio, not a claimed win probability
-    score = round(100 * agreeing / selected)
-    unanimous = agreeing == selected
-    why = [txt for d, txt in reasons if d == direction]
-    return {
-        "pair": pair, "direction": "UP" if direction > 0 else "DOWN",
-        "score": score, "agree": f"{agreeing}/{selected}", "unanimous": unanimous,
-        "price": round(cl[-1], 5), "timeframe": "5 min",
-        "reasons": why[:8], "data_mode": mode_label, "candle_time": candles[-1]["t"],
-    }
+    chosen=[k for k,v in strategies.items() if v and k in STRATEGY_NAMES]
+    if not chosen: return None
+    # Provider may include a still-forming candle. Only use bars that have ended.
+    now=time.time()
+    closed=[x for x in candles if x["t"] + tf <= now]
+    if len(closed)<65: return None
+    votes=strategy_signals(closed)
+    if any(k not in votes for k in chosen): return None
+    directions={votes[k][0] for k in chosen}
+    if len(directions)!=1: return None
+    direction=directions.pop()
+    # 100% means agreement among chosen strategies, NOT success probability.
+    return {"pair":pair,"direction":"UP" if direction>0 else "DOWN",
+            "score":100,"agree":f"{len(chosen)}/{len(chosen)}", "unanimous":True,
+            "price":round(closed[-1]["c"],5),"timeframe":"5 min",
+            "reasons":[STRATEGY_NAMES[k]+": "+votes[k][1] for k in chosen],
+            "data_mode":mode_label,"candle_time":closed[-1]["t"]}
 
 
 # ---------------- الحالة ----------------
 state = {
     "running": False, "status": "Ready", "mode": "otc", "source": SOURCES["otc"],
     "timeframe": 300, "min_score": 65,
-    "strategies": {k: True for k in INDICATORS},
-    "indicator_names": {k: v[0] for k, v in INDICATORS.items()},
+    "strategies": {k: (k == "engulf") for k in STRATEGY_NAMES},
+    "indicator_names": STRATEGY_NAMES,
     "last_scan": None, "next_scan": None, "opportunities": [],
     "scanned": 0, "failed": 0, "market_open": None,
     "otc_pairs": [], "quota_text": None, "budget_note": None,
@@ -477,7 +520,7 @@ def scan():
         tf, strategies, min_score, mode = state["timeframe"], dict(state["strategies"]), state["min_score"], state["mode"]
     if not any(strategies.values()):
         with lock:
-            state["opportunities"], state["status"] = [], "Select at least one indicator"
+            state["opportunities"], state["status"] = [], "Select at least one strategy"
         return
 
     if mode == "otc":
