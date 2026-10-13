@@ -310,7 +310,7 @@ state = {
     "strategies": {k: (k == "engulf") for k in STRATEGY_NAMES},
     "indicator_names": STRATEGY_NAMES,
     "last_scan": None, "next_scan": None, "opportunities": [],
-    "scanned": 0, "failed": 0, "market_open": None,
+    "scanned": 0, "failed": 0, "market_open": None, "diagnostics": {"feed":"WAITING", "last_success":None, "last_attempt":None, "last_candle":None, "candle_count":0, "last_price":None, "strategies":{}, "error":None},
     "otc_pairs": [], "quota_text": None, "budget_note": None,
 }
 
@@ -509,56 +509,59 @@ def fetch_real(symbol, tf):
 
 # ---------------- المسح ----------------
 def scan():
+    """One observable Binance scan: feed status is separate from strategy outcome."""
     with lock:
-        tf, strategies, min_score, mode = state["timeframe"], dict(state["strategies"]), state["min_score"], state["mode"]
-    if not any(strategies.values()):
+        tf = state["timeframe"]
+        selected = [k for k, enabled in state["strategies"].items() if enabled and k in STRATEGY_NAMES]
+        min_score = state["min_score"]
+        diag = dict(state["diagnostics"])
+        diag["last_attempt"] = datetime.now(timezone.utc).isoformat()
+        state["diagnostics"] = diag
+    if not selected:
         with lock:
-            state["opportunities"], state["status"] = [], "Select at least one strategy"
+            state["opportunities"] = []
+            state["status"] = "Select at least one strategy"
+        print("[RADAR] No strategies selected", flush=True)
         return
-
-    mode = "real"
-    items = [("SOL/USDT", "SOLUSDT")]
-    fetch, label, workers = fetch_real, "BINANCE SPOT · SOL/USDT", 1
-
-    fatal = []
-
-    def one(item):
-        name, sym = item
-        try:
-            candles = fetch(sym, tf)
-            if len(candles) < 60:
-                return None
-            settle_from_candles(name, candles, mode)
-            return analyze(name, candles, strategies, tf, label)
-        except Exception as e:
-            if otcharts and isinstance(e, (otcharts.QuotaExceeded, otcharts.AuthError)):
-                fatal.append(e)
-            return None
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(one, items))
-    if fatal:
-        raise fatal[0]
-
-    ok = [r for r in results if r]
-    now = time.time()
-    fresh = [r for r in ok if now - r["candle_time"] < STALE_SECONDS] if mode == "real" else ok
-    ranked = sorted(fresh, key=lambda r: r["score"], reverse=True)
-    best = [r for r in ranked if r["unanimous"] and r["score"] >= min_score][:3]
-    for r in best:
-        log_signal(r, tf, mode)
-    with lock:
-        state["opportunities"] = best
-        state["scanned"] = len(ok)
-        state["failed"] = results.count(None)
-        state["market_open"] = (bool(fresh) if ok else None) if mode == "real" else True
-        state["last_scan"] = datetime.now(timezone.utc).isoformat()
-        if mode == "real" and ok and not fresh:
-            state["status"] = "Waiting for Binance SOL/USDT data"
-        elif not ok:
-            state["status"] = "No matching strategy or Binance data unavailable — retrying"
-        else:
-            state["status"] = f"Scanning automatically — {len(ok)}/{len(items)} pairs read"
+    try:
+        candles = fetch_real("SOLUSDT", tf)
+        if len(candles) < 66:
+            raise RuntimeError(f"Too few Binance candles: {len(candles)}")
+        now = time.time()
+        closed = [x for x in candles if x["t"] + tf <= now]
+        if len(closed) < 65:
+            raise RuntimeError(f"Too few completed candles: {len(closed)}")
+        if now - (closed[-1]["t"] + tf) > 600:
+            raise RuntimeError("Binance candles are stale")
+        votes = strategy_signals(closed)
+        details = {k: {"name": STRATEGY_NAMES[k], "result": ("UP" if votes[k][0] > 0 else "DOWN") if k in votes else "NO_SIGNAL", "selected": k in selected} for k in STRATEGY_NAMES}
+        opportunity = analyze("SOL/USDT", candles, {k:k in selected for k in STRATEGY_NAMES}, tf, "BINANCE SPOT · SOL/USDT")
+        best = [opportunity] if opportunity and opportunity["score"] >= min_score else []
+        settle_from_candles("SOL/USDT", candles, "real")
+        for signal in best:
+            log_signal(signal, tf, "real")
+        iso = datetime.now(timezone.utc).isoformat()
+        with lock:
+            state["opportunities"] = best
+            state["scanned"] = 1
+            state["failed"] = 0
+            state["market_open"] = True
+            state["last_scan"] = iso
+            state["status"] = "Binance connected · strategy scan complete" + (" · signal found" if best else " · no matching setup")
+            state["diagnostics"] = {"feed":"CONNECTED", "last_success":iso, "last_attempt":diag["last_attempt"], "last_candle":datetime.fromtimestamp(closed[-1]["t"],timezone.utc).isoformat(), "candle_count":len(candles), "last_price":candles[-1]["c"], "strategies":details, "error":None}
+        print(f"[RADAR] Binance CONNECTED SOLUSDT candles={len(candles)} closed={len(closed)} price={candles[-1]['c']} strategies={json.dumps({k:v['result'] for k,v in details.items()},ensure_ascii=False)} selected={selected} signal={bool(best)}", flush=True)
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        with lock:
+            state["opportunities"] = []
+            state["failed"] = 1
+            state["market_open"] = False
+            state["last_scan"] = datetime.now(timezone.utc).isoformat()
+            diag["feed"] = "ERROR"
+            diag["error"] = message[:300]
+            state["diagnostics"] = diag
+            state["status"] = "Binance ERROR · " + message[:180]
+        print(f"[RADAR] Binance ERROR {message}", flush=True)
 
 
 def next_interval(mode, tf, now):
@@ -606,6 +609,9 @@ def loop():
                     msg = "OTCharts key missing or invalid — set OTCHARTS_API_KEY in Railway"
                 with lock:
                     state["status"] = msg
+                    state["diagnostics"]["feed"] = "ERROR"
+                    state["diagnostics"]["error"] = msg[:300]
+                print(f"[RADAR] Loop ERROR: {msg}", flush=True)
             nxt, note = next_interval(mode, tf, time.time())
             with lock:
                 state["next_scan"], state["budget_note"] = nxt, note
