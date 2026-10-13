@@ -298,14 +298,14 @@ def analyze(pair, candles, strategies, tf, mode_label):
     # 100% means agreement among chosen strategies, NOT success probability.
     return {"pair":pair,"direction":"UP" if direction>0 else "DOWN",
             "score":100,"agree":f"{len(chosen)}/{len(chosen)}", "unanimous":True,
-            "price":round(closed[-1]["c"],5),"timeframe":"5 min",
+            "price":round(next((x["o"] for x in candles if x["t"] >= closed[-1]["t"]+tf), closed[-1]["c"]),5),"timeframe":"5 min",
             "reasons":[STRATEGY_NAMES[k]+": "+votes[k][1] for k in chosen],
             "data_mode":mode_label,"candle_time":closed[-1]["t"]}
 
 
 # ---------------- الحالة ----------------
 state = {
-    "running": False, "status": "Ready", "mode": "otc", "source": SOURCES["otc"],
+    "running": False, "status": "Ready", "mode": "real", "source": "BINANCE SPOT · SOL/USDT",
     "timeframe": 300, "min_score": 65,
     "strategies": {k: (k == "engulf") for k in STRATEGY_NAMES},
     "indicator_names": STRATEGY_NAMES,
@@ -495,23 +495,16 @@ def fetch_otc(sym, tf):
     return [{"t": b.time - PO_CLOCK_OFFSET, "o": b.open, "h": b.high, "l": b.low, "c": b.close} for b in bars]
 
 
-# ---------------- مصدر السوق الحقيقي ----------------
+# Binance public market data; no credentials required.
 def fetch_real(symbol, tf):
-    interval, rng = ("1m", "1d") if tf == 60 else ("5m", "5d")
-    err = None
-    for host in ("query1", "query2"):
-        url = f"https://{host}.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={rng}"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                res = json.load(r)["chart"]["result"][0]
-            q = res["indicators"]["quote"][0]
-            return [{"t": t, "o": o, "h": h, "l": l, "c": c}
-                    for t, o, h, l, c in zip(res["timestamp"], q["open"], q["high"], q["low"], q["close"])
-                    if None not in (o, h, l, c)]
-        except Exception as e:
-            err = e
-    raise RuntimeError(err)
+    url = "https://data-api.binance.vision/api/v3/klines?symbol=SOLUSDT&interval=5m&limit=160"
+    req = urllib.request.Request(url, headers={"User-Agent": "TradeRadar-SOL/2.8"})
+    with urllib.request.urlopen(req, timeout=15) as response:
+        rows = json.load(response)
+    if not isinstance(rows, list):
+        raise RuntimeError("Invalid Binance candle response")
+    return [{"t": int(x[0])/1000, "o": float(x[1]), "h": float(x[2]),
+             "l": float(x[3]), "c": float(x[4])} for x in rows]
 
 
 # ---------------- المسح ----------------
@@ -523,12 +516,9 @@ def scan():
             state["opportunities"], state["status"] = [], "Select at least one strategy"
         return
 
-    if mode == "otc":
-        items = [(pretty(s), s) for s in otc_pairs()]
-        fetch, label, workers = fetch_otc, "POCKET OTC · LIVE", 3
-    else:
-        items = list(REAL_PAIRS.items())
-        fetch, label, workers = fetch_real, "REAL MARKET · LIVE", 6
+    mode = "real"
+    items = [("SOL/USDT", "SOLUSDT")]
+    fetch, label, workers = fetch_real, "BINANCE SPOT · SOL/USDT", 1
 
     fatal = []
 
@@ -564,9 +554,9 @@ def scan():
         state["market_open"] = (bool(fresh) if ok else None) if mode == "real" else True
         state["last_scan"] = datetime.now(timezone.utc).isoformat()
         if mode == "real" and ok and not fresh:
-            state["status"] = "Market closed — switch to Pocket Option OTC"
+            state["status"] = "Waiting for Binance SOL/USDT data"
         elif not ok:
-            state["status"] = "No data returned — retrying next scan"
+            state["status"] = "No matching strategy or Binance data unavailable — retrying"
         else:
             state["status"] = f"Scanning automatically — {len(ok)}/{len(items)} pairs read"
 
@@ -653,7 +643,7 @@ def status():
 def config():
     d = request.get_json(silent=True) or {}
     with lock:
-        if d.get("mode") in SOURCES and d["mode"] != state["mode"]:
+        if False:  # SOL-only feed; mode selection disabled
             state.update(mode=d["mode"], source=SOURCES[d["mode"]], opportunities=[], last_scan=None,
                          next_scan=None, budget_note=None)
         # V2.4 is intentionally fixed to five-minute signals only.
